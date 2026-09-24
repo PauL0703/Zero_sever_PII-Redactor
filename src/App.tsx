@@ -3,11 +3,16 @@ import * as Comlink from 'comlink';
 import { getHardwareDiagnostics, type HardwareDiagnostics } from './core/diagnostics';
 import DiagnosticsCard from './components/DiagnosticsCard';
 import HighlighterView from './components/HighlighterView';
+import PDFUpload from './components/PDFUpload';
+import PDFResultsView from './components/PDFResultsView';
 import type { PIIEntity } from './core/types';
+import type { PDFProcessingResult, PDFProgressEvent } from './core/pdf/types';
 import type { ProgressCallback } from './worker';
 
 const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
 const api = Comlink.wrap<any>(worker);
+
+type InputMode = 'text' | 'pdf';
 
 function App() {
   const [diagnostics, setDiagnostics] = useState<HardwareDiagnostics | null>(null);
@@ -17,6 +22,13 @@ function App() {
   
   const [inputText, setInputText] = useState<string>('');
   const [entities, setEntities] = useState<PIIEntity[]>([]);
+
+  // PDF-specific state
+  const [inputMode, setInputMode] = useState<InputMode>('text');
+  const [pdfResult, setPdfResult] = useState<PDFProcessingResult | null>(null);
+  const [pdfFileName, setPdfFileName] = useState<string>('');
+  const [pdfProgress, setPdfProgress] = useState<PDFProgressEvent | null>(null);
+  const [pdfError, setPdfError] = useState<string | null>(null);
 
   useEffect(() => {
     async function fetchDiagnostics() {
@@ -67,6 +79,41 @@ function App() {
     }
   };
 
+  const handlePDFSelected = async (buffer: ArrayBuffer, fileName: string) => {
+    setPdfError(null);
+    setPdfResult(null);
+    setPdfFileName(fileName);
+    setAppState('processing');
+    setPdfProgress({ status: 'loading', progress: 0, message: 'Loading PDF...' });
+
+    try {
+      const onPdfProgress = Comlink.proxy((event: PDFProgressEvent) => {
+        setPdfProgress(event);
+        setProgress(event.progress || 0);
+        setProgressText(event.message || event.status.toUpperCase());
+      });
+
+      const result: PDFProcessingResult = await api.processPDF(buffer, onPdfProgress);
+      setPdfResult(result);
+      setPdfProgress(null);
+      setAppState('done');
+    } catch (e) {
+      console.error('PDF processing error:', e);
+      const message = e instanceof Error ? e.message : 'Unknown error processing PDF.';
+      setPdfError(message);
+      setPdfProgress(null);
+      setAppState('ready');
+    }
+  };
+
+  const handlePDFReset = () => {
+    setPdfResult(null);
+    setPdfFileName('');
+    setPdfError(null);
+    setPdfProgress(null);
+    setAppState('ready');
+  };
+
   const applyRedactions = async () => {
     if (!entities.length) return;
     
@@ -90,6 +137,25 @@ function App() {
       alert('FAILED TO COPY');
     }
   };
+
+  const handleModeSwitch = (mode: InputMode) => {
+    if (appState === 'processing') return;
+    setInputMode(mode);
+    // Reset mode-specific state when switching
+    if (mode === 'text') {
+      setPdfResult(null);
+      setPdfFileName('');
+      setPdfError(null);
+      setPdfProgress(null);
+    } else {
+      setEntities([]);
+    }
+    if (appState === 'done') {
+      setAppState('ready');
+    }
+  };
+
+  const isEngineActive = appState === 'ready' || appState === 'processing' || appState === 'done';
 
   return (
     <div className="min-h-screen bg-[#f4f4f0] text-black font-sans p-4 md:p-8">
@@ -136,7 +202,7 @@ function App() {
                 </div>
               )}
 
-              {(appState === 'ready' || appState === 'processing' || appState === 'done') && (
+              {isEngineActive && (
                 <div className="bg-[#FF69B4] border-4 border-black p-3 text-center font-black uppercase text-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]" role="status">
                   ENGINE ACTIVE
                 </div>
@@ -156,7 +222,7 @@ function App() {
               <div className="border-4 border-black bg-white p-6 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] space-y-6">
                 <div className="flex justify-between items-end border-b-4 border-black pb-4">
                   <h2 className="text-3xl font-black uppercase">Document Analyzer</h2>
-                  {appState === 'done' && (
+                  {appState === 'done' && inputMode === 'text' && (
                     <button 
                       onClick={applyRedactions}
                       className="bg-[#00FF00] hover:bg-[#00CC00] active:translate-x-[4px] active:translate-y-[4px] active:shadow-none border-4 border-black font-black uppercase px-6 py-2 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] transition-all"
@@ -166,42 +232,131 @@ function App() {
                     </button>
                   )}
                 </div>
+
+                {/* Mode Toggle */}
+                <div className="flex gap-0">
+                  <button
+                    onClick={() => handleModeSwitch('text')}
+                    disabled={appState === 'processing'}
+                    className={`flex-1 border-4 border-black font-black uppercase py-3 text-lg transition-all ${
+                      inputMode === 'text'
+                        ? 'bg-[#FF69B4] text-white shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]'
+                        : 'bg-white hover:bg-gray-100'
+                    } ${appState === 'processing' ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    aria-label="Switch to text input mode"
+                    id="mode-text-btn"
+                  >
+                    📝 TEXT
+                  </button>
+                  <button
+                    onClick={() => handleModeSwitch('pdf')}
+                    disabled={appState === 'processing'}
+                    className={`flex-1 border-4 border-l-0 border-black font-black uppercase py-3 text-lg transition-all ${
+                      inputMode === 'pdf'
+                        ? 'bg-[#FF69B4] text-white shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]'
+                        : 'bg-white hover:bg-gray-100'
+                    } ${appState === 'processing' ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    aria-label="Switch to PDF upload mode"
+                    id="mode-pdf-btn"
+                  >
+                    📄 PDF
+                  </button>
+                </div>
                 
-                {appState === 'ready' || appState === 'processing' ? (
-                  <div className="space-y-6">
-                    <textarea 
-                      value={inputText}
-                      onChange={(e) => setInputText(e.target.value)}
-                      disabled={appState === 'processing'}
-                      className="w-full min-h-[300px] p-4 bg-[#f4f4f0] border-4 border-black font-mono text-lg shadow-[inset_4px_4px_0px_0px_rgba(0,0,0,0.2)] focus:outline-none focus:ring-4 focus:ring-[#FF00FF] disabled:opacity-50"
-                      placeholder="PASTE SENSITIVE DOCUMENT HERE..."
-                      aria-label="Input document text"
-                    />
-                    <button 
-                      onClick={handleAnalyze}
-                      disabled={appState === 'processing'}
-                      className="w-full bg-[#FF69B4] hover:bg-[#CC00CC] active:translate-x-[4px] active:translate-y-[4px] active:shadow-none text-white border-4 border-black font-black uppercase py-4 text-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                      aria-busy={appState === 'processing'}
-                    >
-                      {appState === 'processing' ? 'SCANNING...' : 'SCAN FOR PII'}
-                    </button>
-                  </div>
-                ) : (
-                  <div className="space-y-6">
-                    <div className="bg-[#FFFF00] border-4 border-black p-4 flex justify-between items-center shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
-                      <span className="font-black uppercase text-xl">
-                        FOUND <span className="bg-[#FF0000] text-white px-2 py-0.5">{entities.length}</span> SENSITIVE ENTITIES
-                      </span>
-                      <button 
-                        onClick={() => setAppState('ready')}
-                        className="bg-white hover:bg-gray-200 border-4 border-black font-bold uppercase px-4 py-1 active:translate-x-[2px] active:translate-y-[2px] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] active:shadow-none transition-all"
-                        aria-label="Scan another document"
-                      >
-                        RESET
-                      </button>
-                    </div>
-                    <HighlighterView text={inputText} entities={entities} />
-                  </div>
+                {/* TEXT MODE */}
+                {inputMode === 'text' && (
+                  <>
+                    {appState === 'ready' || appState === 'processing' ? (
+                      <div className="space-y-6">
+                        <textarea 
+                          value={inputText}
+                          onChange={(e) => setInputText(e.target.value)}
+                          disabled={appState === 'processing'}
+                          className="w-full min-h-[300px] p-4 bg-[#f4f4f0] border-4 border-black font-mono text-lg shadow-[inset_4px_4px_0px_0px_rgba(0,0,0,0.2)] focus:outline-none focus:ring-4 focus:ring-[#FF00FF] disabled:opacity-50"
+                          placeholder="PASTE SENSITIVE DOCUMENT HERE..."
+                          aria-label="Input document text"
+                        />
+                        <button 
+                          onClick={handleAnalyze}
+                          disabled={appState === 'processing'}
+                          className="w-full bg-[#FF69B4] hover:bg-[#CC00CC] active:translate-x-[4px] active:translate-y-[4px] active:shadow-none text-white border-4 border-black font-black uppercase py-4 text-2xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                          aria-busy={appState === 'processing'}
+                        >
+                          {appState === 'processing' ? 'SCANNING...' : 'SCAN FOR PII'}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="space-y-6">
+                        <div className="bg-[#FFFF00] border-4 border-black p-4 flex justify-between items-center shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+                          <span className="font-black uppercase text-xl">
+                            FOUND <span className="bg-[#FF0000] text-white px-2 py-0.5">{entities.length}</span> SENSITIVE ENTITIES
+                          </span>
+                          <button 
+                            onClick={() => setAppState('ready')}
+                            className="bg-white hover:bg-gray-200 border-4 border-black font-bold uppercase px-4 py-1 active:translate-x-[2px] active:translate-y-[2px] shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] active:shadow-none transition-all"
+                            aria-label="Scan another document"
+                          >
+                            RESET
+                          </button>
+                        </div>
+                        <HighlighterView text={inputText} entities={entities} />
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* PDF MODE */}
+                {inputMode === 'pdf' && (
+                  <>
+                    {(appState === 'ready' || appState === 'processing') && !pdfResult && (
+                      <div className="space-y-4">
+                        <PDFUpload
+                          onFileSelected={handlePDFSelected}
+                          disabled={appState === 'processing'}
+                        />
+
+                        {/* PDF Progress */}
+                        {appState === 'processing' && pdfProgress && (
+                          <div className="space-y-2" aria-live="polite" aria-atomic="true">
+                            <div className="flex justify-between font-black uppercase text-sm">
+                              <span className="truncate pr-2">{pdfProgress.message || pdfProgress.status}</span>
+                              <span>{pdfProgress.progress || 0}%</span>
+                            </div>
+                            <div className="h-6 w-full bg-white border-4 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
+                              <div 
+                                className="h-full bg-[#FF00FF] transition-all"
+                                style={{ width: `${pdfProgress.progress || 0}%` }}
+                              ></div>
+                            </div>
+                            {pdfProgress.page != null && pdfProgress.totalPages != null && (
+                              <div className="text-xs font-bold uppercase text-center opacity-60">
+                                Page {pdfProgress.page} / {pdfProgress.totalPages}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* PDF Error */}
+                        {pdfError && (
+                          <div
+                            className="bg-[#FF0000] text-white border-4 border-black p-3 font-bold uppercase shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]"
+                            role="alert"
+                          >
+                            ⚠️ {pdfError}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* PDF Results */}
+                    {appState === 'done' && pdfResult && (
+                      <PDFResultsView
+                        result={pdfResult}
+                        fileName={pdfFileName}
+                        onReset={handlePDFReset}
+                      />
+                    )}
+                  </>
                 )}
               </div>
             )}
